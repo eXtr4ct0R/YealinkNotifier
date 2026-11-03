@@ -1,4 +1,4 @@
-name: Build Windows Go app
+name: Build YealinkNotifier
 
 on:
   push:
@@ -9,9 +9,15 @@ on:
 permissions:
   contents: read
 
+# The app is cross-platform (Windows / Linux / macOS). systray and parts of
+# beeep require cgo, so every build runs with CGO_ENABLED=1 and each OS is
+# built on a native runner (no cross-compilation):
+#   windows-latest  - cgo via MinGW-w64 gcc (installed via choco if missing)
+#   ubuntu-latest   - cgo via gcc + GTK3 + libayatana-appindicator dev packages
+#   macos-latest    - cgo via the system clang, out of the box
 jobs:
-  build:
-    name: Build
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,23 +28,6 @@ jobs:
         with:
           go-version: '1.27'
           cache: true
-
-      - name: Verify toolchain
-        run: go version
-
-      - name: Download modules
-        run: go mod download
-
-      # The app is Windows-only: dependencies (go-toast) do not compile for linux,
-      # so vet and staticcheck must target GOOS=windows.
-      - name: Vet
-        run: GOOS=windows go vet ./...
-
-      - name: Staticcheck
-        shell: bash
-        run: |
-          GOBIN=/tmp/bin go install honnef.co/go/tools/cmd/staticcheck@latest
-          GOOS=windows /tmp/bin/staticcheck ./...
 
       - name: Check formatting
         shell: bash
@@ -51,8 +40,31 @@ jobs:
           fi
           echo "All files are properly formatted."
 
-      - name: Test
-        run: GOOS=windows go test ./...
+      # vet with GOOS=windows: the cgo (GTK/systray) linux backends need dev
+      # headers just to type-check, while the windows code paths are pure-Go
+      # syscall and vet cleanly without a C toolchain.
+      - name: Vet
+        run: GOOS=windows go vet ./...
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Full history so `git describe --tags` produces a real version.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Install MinGW-w64 (cgo)
+        # cgo needs a C compiler and windows-latest does not guarantee one.
+        run: choco install -y mingw
 
       - name: Compute version
         id: version
@@ -60,31 +72,74 @@ jobs:
         run: |
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
 
-      - name: Build Windows binary
+      - name: Build
         shell: bash
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: 1
           GOOS: windows
           GOARCH: amd64
         run: >
           go build -trimpath
-          -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }} -H windowsgui"
           -o bin/YealinkNotifier.exe .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64
           path: bin/YealinkNotifier.exe
 
-  release:
-    name: Release
-    needs: build
+  build-linux:
+    name: Build (Linux)
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Install cgo dependencies
+        # systray/beeep link against GTK3 and the app indicator at build time.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libayatana-appindicator3-dev libgtk-3-dev
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
+
+      - name: Build
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: >
+          go build -trimpath
+          -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          -o bin/YealinkNotifier .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
+          path: bin/YealinkNotifier
+
+  build-darwin:
+    name: Build (Darwin)
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -103,23 +158,75 @@ jobs:
         run: |
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolving release version: ${VERSION}"
+          echo "Building version: ${VERSION}"
 
-      - name: Build Windows binary
-        shell: bash
+      - name: Build
         env:
-          CGO_ENABLED: 0
-          GOOS: windows
+          CGO_ENABLED: 1
+          GOOS: darwin
           GOARCH: amd64
         run: >
           go build -trimpath
           -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
-          -o dist-asset/YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe .
+          -o bin/YealinkNotifier .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
+          path: bin/YealinkNotifier
+
+  release:
+    name: Release
+    needs: [build-windows, build-linux, build-darwin]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolving release version: ${VERSION}"
+
+      # Separate target dirs: the linux and darwin binaries share the name
+      # "YealinkNotifier" and would overwrite each other in one directory.
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64
+          path: assets/windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
+          path: assets/linux
+
+      - name: Download Darwin artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
+          path: assets/darwin
+
+      - name: Rename release assets
+        shell: bash
+        run: |
+          V=${{ steps.version.outputs.version }}
+          mv assets/windows/YealinkNotifier.exe YealinkNotifier-${V}-windows-amd64.exe
+          mv assets/linux/YealinkNotifier     YealinkNotifier-${V}-linux-amd64
+          mv assets/darwin/YealinkNotifier    YealinkNotifier-${V}-darwin-amd64
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist-asset/YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
+          files: |
+            YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
+            YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
+            YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
           draft: false
           prerelease: false
           generate_release_notes: true
