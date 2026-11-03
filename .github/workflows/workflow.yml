@@ -1,0 +1,125 @@
+name: Build Windows Go app
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Verify toolchain
+        run: go version
+
+      - name: Download modules
+        run: go mod download
+
+      # The app is Windows-only: dependencies (go-toast) do not compile for linux,
+      # so vet and staticcheck must target GOOS=windows.
+      - name: Vet
+        run: GOOS=windows go vet ./...
+
+      - name: Staticcheck
+        shell: bash
+        run: |
+          GOBIN=/tmp/bin go install honnef.co/go/tools/cmd/staticcheck@latest
+          GOOS=windows /tmp/bin/staticcheck ./...
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "All files are properly formatted."
+
+      - name: Test
+        run: GOOS=windows go test ./...
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Windows binary
+        shell: bash
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: >
+          go build -trimpath
+          -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          -o bin/YealinkNotifier.exe .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
+          path: bin/YealinkNotifier.exe
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolving release version: ${VERSION}"
+
+      - name: Build Windows binary
+        shell: bash
+        env:
+          CGO_ENABLED: 0
+          GOOS: windows
+          GOARCH: amd64
+        run: >
+          go build -trimpath
+          -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          -o dist-asset/YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe .
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist-asset/YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
