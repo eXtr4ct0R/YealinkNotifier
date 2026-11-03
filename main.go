@@ -1,111 +1,61 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
+	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
-	"unsafe"
 
-	"github.com/go-toast/toast"
+	"github.com/gen2brain/beeep"
+
+	"YealinkNotifier/core"
+	"YealinkNotifier/server"
+	"YealinkNotifier/tray"
 )
-
-var (
-	winmm      = syscall.NewLazyDLL("winmm.dll")
-	playSoundW = winmm.NewProc("PlaySoundW")
-)
-
-const (
-	SND_ASYNC    = 0x0001
-	SND_FILENAME = 0x00020000
-
-	powershellPath = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
-)
-
-var fallbackSem = make(chan struct{}, 3)
-
-func playWindowsSound() {
-	soundPath := `C:\Windows\Media\Windows Notify System Generic.wav`
-	if _, err := os.Stat(soundPath); os.IsNotExist(err) {
-		soundPath = `C:\Windows\Media\Windows Notify.wav`
-	}
-
-	ptr, err := syscall.UTF16PtrFromString(soundPath)
-	if err == nil {
-		// Play sound asynchronously
-		playSoundW.Call(uintptr(unsafe.Pointer(ptr)), 0, SND_ASYNC|SND_FILENAME)
-	}
-}
-
-func showToast(title, message string) {
-	notification := toast.Notification{
-		AppID:   "YealinkNotifier",
-		Title:   title,
-		Message: message,
-	}
-
-	if err := notification.Push(); err != nil {
-		log.Printf("Error in go-toast (%v), use PowerShell fallback", err)
-
-		select {
-		case fallbackSem <- struct{}{}:
-			defer func() { <-fallbackSem }()
-		default:
-			log.Printf("PowerShell fallback busy, skipping")
-			return
-		}
-
-		psScript := `
-			[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
-			$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-			$textNodes = $template.GetElementsByTagName("text")
-			$textNodes.Item(0).AppendChild($template.CreateTextNode($args[0])) > $null
-			$textNodes.Item(1).AppendChild($template.CreateTextNode($args[1])) > $null
-			$toast = [Windows.UI.Notifications.ToastNotification]::new($template)
-			[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("YealinkNotifier").Show($toast)
-		`
-		cmd := exec.Command(powershellPath, "-NoProfile", "-Command", psScript, title, message)
-
-		if err := cmd.Run(); err != nil {
-			log.Printf("Error in PowerShell (%v)", err)
-			return
-		}
-	}
-}
-
-func handler(w http.ResponseWriter, r *http.Request) {
-	path := strings.ReplaceAll(strings.ReplaceAll(r.URL.Path, "\r", "\\r"), "\n", "\\n")
-	log.Printf("[%s] Signal received: %s", r.RemoteAddr, path)
-
-	query := r.URL.Query()
-	caller := query.Get("number")
-	if caller == "" {
-		caller = query.Get("caller")
-	}
-
-	title := "📞 Incoming call from Yealink"
-	message := "You are being called! Check your office phone."
-	if caller != "" {
-		message = fmt.Sprintf("Caller number: %s", caller)
-	}
-
-	go showToast(title, message)
-	go playWindowsSound()
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
 
 var version = "dev"
+
+func defaultLogPath() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "YealinkNotifier", "yealinknotifier.log")
+}
+
+func setupLogging(logfile string, quiet bool) {
+	if quiet {
+		log.SetOutput(io.Discard)
+		return
+	}
+	if logfile == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(logfile), 0o755); err != nil {
+		log.Printf("Error creating log directory (%s): %v", filepath.Dir(logfile), err)
+		return
+	}
+	f, err := os.OpenFile(logfile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("Error opening log file (%s): %v", logfile, err)
+		return
+	}
+	log.SetOutput(f)
+}
 
 func main() {
 	port := flag.Int("port", 8080, "working port")
 	ip := flag.String("addr", "0.0.0.0", "bind address")
+	logfile := flag.String("logfile", defaultLogPath(), "log file path (empty = write to the console)")
+	quiet := flag.Bool("quiet", false, "disable all logging")
 	versionFlag := flag.Bool("version", false, "show version")
 
 	flag.Parse()
@@ -119,27 +69,46 @@ func main() {
 		os.Exit(1)
 	}
 
+	setupLogging(*logfile, *quiet)
+
+	beeep.AppName = "YealinkNotifier"
+
 	addr := fmt.Sprintf("%s:%d", *ip, *port)
 
-	http.HandleFunc("/", handler)
-
-	fmt.Println("==================================================")
-	fmt.Printf("   Version: %s\n", version)
-	fmt.Printf("   Server listening on port: %d\n", *port)
-	fmt.Printf("   URL for Yealink Webhook:\n")
-	fmt.Printf("   http://%s/?number=$remote_number\n", addr)
-	fmt.Printf("   or http://%s/?number=%%remote_number%%\n", addr)
-	fmt.Printf("   or http://%s/\n", addr)
-	fmt.Println("==================================================")
-
-	srv := &http.Server{
-		Addr:              addr,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+	if *logfile != "" && !*quiet {
+		log.Printf("Logging to %s", *logfile)
 	}
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Error starting server: %v", err)
+	log.Printf("==================================================")
+	log.Printf("   Version: %s", version)
+	log.Printf("   Server listening on port: %d", *port)
+	log.Printf("   URL for Yealink Webhook:")
+	log.Printf("   http://%s/?number=$remote_number", addr)
+	log.Printf("   or http://%s/?number=%%remote_number%%", addr)
+	log.Printf("   or http://%s/", addr)
+	log.Printf("==================================================")
+
+	app := core.New()
+	srv := server.New(app, addr)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Error starting server: %v", err)
+		}
+	}()
+
+	shutdown := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		app.Shutdown(ctx)
 	}
+
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		tray.Stop()
+		shutdown()
+	}()
+
+	tray.RunSafe(app, shutdown)
 }
