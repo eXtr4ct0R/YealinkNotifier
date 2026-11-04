@@ -6,6 +6,10 @@ on:
     tags: ['v*']
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || !startsWith(github.ref, 'refs/tags/') }}
+
 permissions:
   contents: read
 
@@ -15,10 +19,12 @@ permissions:
 #   windows-latest  - cgo via MinGW-w64 gcc (installed via choco if missing)
 #   ubuntu-latest   - cgo via gcc + GTK3 + libayatana-appindicator dev packages
 #   macos-latest    - cgo via the system clang, out of the box
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -49,6 +55,7 @@ jobs:
   build-windows:
     name: Build (Windows)
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -94,6 +101,7 @@ jobs:
   build-linux:
     name: Build (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -140,6 +148,7 @@ jobs:
   build-darwin:
     name: Build (Darwin)
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -180,17 +189,19 @@ jobs:
     name: Release
     needs: [build-windows, build-linux, build-darwin]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
+      # Release runs only on tags, so github.ref_name IS the tag (e.g. "v0.0.3").
+      # No checkout needed, no `git describe` — just take the ref name directly.
       - name: Compute version
         id: version
         shell: bash
         run: |
-          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo dev)
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolving release version: ${VERSION}"
+          echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "Resolving release version: ${{ github.ref_name }}"
 
       # Separate target dirs: the linux and darwin binaries share the name
       # "YealinkNotifier" and would overwrite each other in one directory.
@@ -217,12 +228,13 @@ jobs:
         run: |
           V=${{ steps.version.outputs.version }}
           mv assets/windows/YealinkNotifier.exe YealinkNotifier-${V}-windows-amd64.exe
-          mv assets/linux/YealinkNotifier     YealinkNotifier-${V}-linux-amd64
-          mv assets/darwin/YealinkNotifier    YealinkNotifier-${V}-darwin-amd64
+          mv assets/linux/YealinkNotifier       YealinkNotifier-${V}-linux-amd64
+          mv assets/darwin/YealinkNotifier      YealinkNotifier-${V}-darwin-amd64
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.version.outputs.version }}
           files: |
             YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
             YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
