@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,42 +15,74 @@ import (
 )
 
 type App struct {
-	enabled  atomic.Bool
+	notify   atomic.Bool
+	beep     atomic.Bool
 	shutdown func(context.Context)
+
+	histMu  sync.Mutex
+	hist    []Event
+	histVer atomic.Uint64
 
 	stop     chan struct{}
 	stopOnce sync.Once
 }
 
-func New() *App {
+func New(notify, beep bool) *App {
 	a := &App{stop: make(chan struct{})}
-	a.enabled.Store(true)
+	a.notify.Store(notify)
+	a.beep.Store(beep)
 	return a
 }
 
-func (a *App) Enabled() bool {
-	return a.enabled.Load()
+func (a *App) NotifyEnabled() bool {
+	return a.notify.Load()
 }
 
-func (a *App) SetEnabled(on bool) {
-	a.enabled.Store(on)
+func (a *App) SetNotify(on bool) {
+	a.notify.Store(on)
+}
+
+func (a *App) BeepEnabled() bool {
+	return a.beep.Load()
+}
+
+func (a *App) SetBeep(on bool) {
+	a.beep.Store(on)
+}
+
+func (a *App) AnyEnabled() bool {
+	return a.notify.Load() || a.beep.Load()
 }
 
 func (a *App) OnCall(caller string) {
-	if !a.Enabled() {
-		return
-	}
 	caller = sanitizeCaller(caller)
+	a.RecordEvent(caller)
 	title := "Incoming call from Yealink"
 	message := "You are being called! Check your office phone."
 	if caller != "" {
 		message = fmt.Sprintf("Caller number: %s", caller)
 	}
-	go a.Notify(title, message)
-	go a.Beep()
+	if a.NotifyEnabled() {
+		go a.Notify(title, message)
+	}
+	if a.BeepEnabled() {
+		go a.Beep()
+	}
 }
 
+var (
+	sipURIRe = regexp.MustCompile(`(?i)^sips?:([^\s:@/?#;]+)((;[^\s@/?#;]*)*)@`)
+	suffixRe = regexp.MustCompile(`_[A-Za-z][A-Za-z0-9]*$`)
+)
+
 func sanitizeCaller(caller string) string {
+	caller = strings.TrimSpace(caller)
+	// "sip:228@10.178.34.88" -> "228"
+	if m := sipURIRe.FindStringSubmatch(caller); m != nil {
+		caller = m[1]
+	}
+	// "144_number" -> "144"
+	caller = suffixRe.ReplaceAllString(caller, "")
 	caller = strings.NewReplacer("<", "", ">", "", "&", "", `"`, "", "'", "").Replace(caller)
 	runes := []rune(caller)
 	if len(runes) > 64 {

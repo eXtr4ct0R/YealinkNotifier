@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +57,9 @@ func main() {
 	ip := flag.String("addr", "0.0.0.0", "bind address")
 	logfile := flag.String("logfile", defaultLogPath(), "log file path (empty = write to the console)")
 	quiet := flag.Bool("quiet", false, "disable all logging")
+	notify := flag.Bool("notify", true, "show system notification on incoming calls (disable = sound may still play)")
+	beep := flag.Bool("beep", true, "play beep on incoming calls (disable = notification may still show)")
+	allowedIPs := flag.String("allowed-ips", "", "comma-separated client IPs or CIDR networks allowed to call the webhook (e.g. 10.0.0.5,192.168.1.0/24; empty = allow all)")
 	versionFlag := flag.Bool("version", false, "show version")
 
 	flag.Parse()
@@ -71,6 +75,13 @@ func main() {
 
 	setupLogging(*logfile, *quiet)
 
+	var allowed []string
+	for p := range strings.SplitSeq(*allowedIPs, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			allowed = append(allowed, p)
+		}
+	}
+
 	beeep.AppName = "YealinkNotifier"
 
 	addr := fmt.Sprintf("%s:%d", *ip, *port)
@@ -81,14 +92,21 @@ func main() {
 	log.Printf("==================================================")
 	log.Printf("   Version: %s", version)
 	log.Printf("   Server listening on port: %d", *port)
+	if len(allowed) > 0 {
+		log.Printf("   Allowed client IPs: %d entries", len(allowed))
+	}
 	log.Printf("   URL for Yealink Webhook:")
 	log.Printf("   http://%s/?number=$remote_number", addr)
 	log.Printf("   or http://%s/?number=%%remote_number%%", addr)
 	log.Printf("   or http://%s/", addr)
 	log.Printf("==================================================")
 
-	app := core.New()
-	srv := server.New(app, addr)
+	app := core.New(*notify, *beep)
+	srv, err := server.New(app, addr, allowed)
+	if err != nil {
+		log.Printf("Error parsing -allowed-ips: %v", err)
+		os.Exit(1)
+	}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
