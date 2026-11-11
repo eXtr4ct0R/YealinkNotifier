@@ -1,14 +1,13 @@
-name: Build YealinkNotifier
+name: Release
 
 on:
   push:
-    branches: ['**']
     tags: ['v*']
-  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || !startsWith(github.ref, 'refs/tags/') }}
+  # Never cancel an in-progress release: builds must complete and publish.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -21,37 +20,6 @@ permissions:
 #   macos-latest    - cgo via the system clang, out of the box
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.27'
-          cache: true
-
-      - name: Check formatting
-        shell: bash
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "The following files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-          echo "All files are properly formatted."
-
-      # vet with GOOS=windows: the cgo (GTK/systray) linux backends need dev
-      # headers just to type-check, while the windows code paths are pure-Go
-      # syscall and vet cleanly without a C toolchain.
-      - name: Vet
-        run: GOOS=windows go vet ./...
-
   build-windows:
     name: Build (Windows)
     runs-on: windows-latest
@@ -190,7 +158,6 @@ jobs:
     needs: [build-windows, build-linux, build-darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
