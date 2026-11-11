@@ -17,20 +17,13 @@ import (
 
 	"github.com/gen2brain/beeep"
 
+	"YealinkNotifier/config"
 	"YealinkNotifier/core"
 	"YealinkNotifier/server"
 	"YealinkNotifier/tray"
 )
 
 var version = "dev"
-
-func defaultLogPath() string {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "YealinkNotifier", "yealinknotifier.log")
-}
 
 func setupLogging(logfile string, quiet bool) {
 	if quiet {
@@ -53,13 +46,14 @@ func setupLogging(logfile string, quiet bool) {
 }
 
 func main() {
-	port := flag.Int("port", 8080, "working port")
-	ip := flag.String("addr", "0.0.0.0", "bind address")
-	logfile := flag.String("logfile", defaultLogPath(), "log file path (empty = write to the console)")
-	quiet := flag.Bool("quiet", false, "disable all logging")
+	port := flag.Int("port", config.DefaultPort, "working port")
+	ip := flag.String("addr", config.DefaultAddr, "bind address")
+	logfile := flag.String("logfile", config.DefaultLogfile(), "log file path (empty = write to the console)")
+	quiet := flag.Bool("quiet", config.DefaultQuiet, "disable all logging")
 	notify := flag.Bool("notify", true, "show system notification on incoming calls (disable = sound may still play)")
 	beep := flag.Bool("beep", true, "play beep on incoming calls (disable = notification may still show)")
 	allowedIPs := flag.String("allowed-ips", "", "comma-separated client IPs or CIDR networks allowed to call the webhook (e.g. 10.0.0.5,192.168.1.0/24; empty = allow all)")
+	configPath := flag.String("config", "", "path to a YAML config file (empty = auto-discover: next to the binary, in the working directory, and in the user config dir)")
 	versionFlag := flag.Bool("version", false, "show version")
 
 	flag.Parse()
@@ -68,15 +62,35 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *ip == "" || *port == 0 {
+	explicit := make(map[string]bool)
+	flag.Visit(func(fl *flag.Flag) { explicit[fl.Name] = true })
+
+	eff, cfgPath, err := config.Load(*configPath, config.Flags{
+		Port: *port, Addr: *ip, Notify: *notify, Beep: *beep,
+		AllowedIPs: strings.Split(*allowedIPs, ","),
+		Logfile:    *logfile, Quiet: *quiet,
+		PortSet: explicit["port"], AddrSet: explicit["addr"],
+		NotifySet: explicit["notify"], BeepSet: explicit["beep"],
+		AllowedIPsSet: explicit["allowed-ips"],
+		LogfileSet:    explicit["logfile"], QuietSet: explicit["quiet"],
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "WARN: no config file found; using built-in defaults")
+	}
+
+	if eff.Addr == "" || eff.Port == 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	setupLogging(*logfile, *quiet)
+	setupLogging(eff.Logfile, eff.Quiet)
 
 	var allowed []string
-	for p := range strings.SplitSeq(*allowedIPs, ",") {
+	for _, p := range eff.AllowedIPs {
 		if p = strings.TrimSpace(p); p != "" {
 			allowed = append(allowed, p)
 		}
@@ -84,14 +98,19 @@ func main() {
 
 	beeep.AppName = "YealinkNotifier"
 
-	addr := fmt.Sprintf("%s:%d", *ip, *port)
+	addr := fmt.Sprintf("%s:%d", eff.Addr, eff.Port)
 
-	if *logfile != "" && !*quiet {
-		log.Printf("Logging to %s", *logfile)
+	if eff.Logfile != "" && !eff.Quiet {
+		log.Printf("Logging to %s", eff.Logfile)
 	}
 	log.Printf("==================================================")
 	log.Printf("   Version: %s", version)
-	log.Printf("   Server listening on port: %d", *port)
+	if cfgPath != "" {
+		log.Printf("   Config file: %s", cfgPath)
+	} else {
+		log.Printf("   Config file: none (using defaults)")
+	}
+	log.Printf("   Server listening on port: %d", eff.Port)
 	if len(allowed) > 0 {
 		log.Printf("   Allowed client IPs: %d entries", len(allowed))
 	}
@@ -101,10 +120,10 @@ func main() {
 	log.Printf("   or http://%s/", addr)
 	log.Printf("==================================================")
 
-	app := core.New(*notify, *beep)
+	app := core.New(eff.Notify, eff.Beep)
 	srv, err := server.New(app, addr, allowed)
 	if err != nil {
-		log.Printf("Error parsing -allowed-ips: %v", err)
+		log.Printf("Error parsing allowed-ips (flag or config): %v", err)
 		os.Exit(1)
 	}
 
