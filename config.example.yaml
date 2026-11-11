@@ -1,0 +1,35 @@
+# YealinkNotifier — example configuration file.
+#
+# Use under a different name (`config.example.yaml` is ignored by the app):
+# copy it to `config.yml` next to the executable, in your working directory,
+# or in your user config dir — or point the app at it with `-config <path>`.
+#
+# Every key is optional; an omitted key falls back to its default (shown in
+# the comment on each line). A CLI flag always wins over a key in this file;
+# a key always wins over the built-in default.
+
+# HTTP listen port.                        (default: 8080)
+port: 8080
+
+# Bind address. Use 127.0.0.1 to limit exposure.  (default: 0.0.0.0)
+addr: 0.0.0.0
+
+# System-notification channel.             (default: true)
+notify: true
+
+# Sound (beep) channel.                    (default: true)
+beep: true
+
+# Client IPs and/or CIDR ranges allowed to call the webhook.
+# Empty or omitted = allow all. Any unparseable entry = startup error (fail-closed).
+allowed_ips:
+  - 127.0.0.1
+  - 192.168.1.0/24
+
+# Log destination.
+# An empty string ("" — quoted) means "write to the console".
+# An omitted key falls back to a file under the OS user-cache dir.
+logfile: ""
+
+# Disable all logging.                     (default: false)
+quiet: false
