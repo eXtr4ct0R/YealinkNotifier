@@ -1,0 +1,8 @@
+# Enforce Unix line endings for Go files
+*.go text eol=lf
+
+# You can also enforce LF for other text files
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

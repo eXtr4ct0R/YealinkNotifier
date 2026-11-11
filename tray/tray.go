@@ -126,6 +126,8 @@ func onReady(app *core.App, shutdown func()) {
 		}
 	}()
 
+	systray.AddSeparator()
+
 	history := systray.AddMenuItem("History", "Incoming call history")
 	slots := make([]*systray.MenuItem, core.HistoryCapacity)
 	for i := range slots {
