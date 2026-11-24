@@ -18,6 +18,7 @@ import (
 	"github.com/gen2brain/beeep"
 
 	"YealinkNotifier/config"
+	"YealinkNotifier/contacts"
 	"YealinkNotifier/core"
 	"YealinkNotifier/server"
 	"YealinkNotifier/tray"
@@ -54,6 +55,7 @@ func main() {
 	beep := flag.Bool("beep", true, "play beep on incoming calls (disable = notification may still show)")
 	allowedIPs := flag.String("allowed-ips", "", "comma-separated client IPs or CIDR networks allowed to call the webhook (e.g. 10.0.0.5,192.168.1.0/24; empty = allow all)")
 	configPath := flag.String("config", "", "path to a YAML config file (empty = auto-discover: next to the binary, in the working directory, and in the user config dir)")
+	contactsPath := flag.String("contacts", "", "path to the contacts CSV file (empty = auto-discover contacts.csv: next to the binary, in the working directory, and in the user config dir)")
 	versionFlag := flag.Bool("version", false, "show version")
 
 	flag.Parse()
@@ -69,10 +71,12 @@ func main() {
 		Port: *port, Addr: *ip, Notify: *notify, Beep: *beep,
 		AllowedIPs: strings.Split(*allowedIPs, ","),
 		Logfile:    *logfile, Quiet: *quiet,
-		PortSet: explicit["port"], AddrSet: explicit["addr"],
+		Contacts: *contactsPath,
+		PortSet:  explicit["port"], AddrSet: explicit["addr"],
 		NotifySet: explicit["notify"], BeepSet: explicit["beep"],
 		AllowedIPsSet: explicit["allowed-ips"],
 		LogfileSet:    explicit["logfile"], QuietSet: explicit["quiet"],
+		ContactsSet: explicit["contacts"],
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -88,6 +92,9 @@ func main() {
 	}
 
 	setupLogging(eff.Logfile, eff.Quiet)
+
+	// Contacts are a fail-open convenience: Resolve never errors or creates.
+	book := contacts.New(contacts.Resolve(eff.Contacts))
 
 	var allowed []string
 	for _, p := range eff.AllowedIPs {
@@ -110,6 +117,7 @@ func main() {
 	} else {
 		log.Printf("   Config file: none (using defaults)")
 	}
+	log.Printf("   Contacts file: %s", book.Path())
 	log.Printf("   Server listening on port: %d", eff.Port)
 	if len(allowed) > 0 {
 		log.Printf("   Allowed client IPs: %d entries", len(allowed))
@@ -121,6 +129,7 @@ func main() {
 	log.Printf("==================================================")
 
 	app := core.New(eff.Notify, eff.Beep)
+	app.SetContacts(book)
 	srv, err := server.New(app, addr, allowed)
 	if err != nil {
 		log.Printf("Error parsing allowed-ips (flag or config): %v", err)

@@ -33,3 +33,10 @@ logfile: ""
 
 # Disable all logging.                     (default: false)
 quiet: false
+
+# Contacts book (CSV with number,name rows) used to show "Name (number)".
+# An empty string ("") or an omitted key = auto-discover contacts.csv next
+# to the executable, in the working directory, or in the user config dir.
+# Fail-open: a missing/malformed file only logs a warning, never an error.
+# In Excel, save as "CSV UTF-8" so non-ASCII names survive.
+contacts: ""
