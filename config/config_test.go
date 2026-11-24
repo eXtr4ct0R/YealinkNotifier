@@ -21,10 +21,37 @@ func writeConfig(t *testing.T, dir, name, content string) string {
 
 func pointerOf[T any](v T) *T { return &v }
 
+// chdirIsolated points the CWD and the user config dir at fresh empty
+// locations under a temp dir (hermetic, per-OS env names like
+// contacts_test.go). HOME is set too: on macOS os.UserConfigDir ignores
+// XDG_CONFIG_HOME and derives the dir from $HOME, so the actual user
+// config dir is read back AFTER setting the env and created if needed.
+func chdirIsolated(t *testing.T) (cwd, ucfg string) {
+	t.Helper()
+	d := t.TempDir()
+	cwd = filepath.Join(d, "cwd")
+	if err := os.Mkdir(cwd, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", cwd, err)
+	}
+	t.Setenv("APPDATA", filepath.Join(d, "userconfig"))         // Windows
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(d, "userconfig")) // Linux
+	t.Setenv("HOME", d)                                         // macOS: $HOME/Library/Application Support
+	var err error
+	ucfg, err = os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir: %v", err)
+	}
+	if err := os.MkdirAll(ucfg, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", ucfg, err)
+	}
+	t.Chdir(cwd)
+	return cwd, ucfg
+}
+
 func assertAllPointersNil(t *testing.T, f file) {
 	t.Helper()
 	if f.Port != nil || f.Addr != nil || f.Notify != nil || f.Beep != nil ||
-		f.Logfile != nil || f.Quiet != nil || f.AllowedIPs != nil {
+		f.Logfile != nil || f.Quiet != nil || f.AllowedIPs != nil || f.Contacts != nil {
 		t.Fatalf("expected all-nil / empty file view, got %+v", f)
 	}
 }
@@ -62,7 +89,8 @@ func TestDecodeStrictReadsEveryValidKey(t *testing.T) {
 		"beep: false\n" +
 		"allowed_ips: [\"10.0.0.1\", \"192.168.1.0/24\"]\n" +
 		"logfile: \"\"\n" +
-		"quiet: true\n"
+		"quiet: true\n" +
+		"contacts: \"book.csv\"\n"
 	f, err := decodeStrict([]byte(doc), "config.yml")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,6 +118,20 @@ func TestDecodeStrictReadsEveryValidKey(t *testing.T) {
 	if !slices.Equal(f.AllowedIPs, want) {
 		t.Errorf("allowed_ips: wanted %v, got %v", want, f.AllowedIPs)
 	}
+	if f.Contacts == nil || *f.Contacts != "book.csv" {
+		t.Errorf("contacts: wanted present book.csv, got %v", f.Contacts)
+	}
+}
+
+func TestDecodeStrictContactsPresentEmpty(t *testing.T) {
+	f, err := decodeStrict([]byte("contacts: \"\"\n"), "config.yml")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A present empty string is a VALUE (auto-discover), not "absent".
+	if f.Contacts == nil || *f.Contacts != "" {
+		t.Errorf("contacts: wanted present empty string, got %v", f.Contacts)
+	}
 }
 
 func TestMergeUnsetKeyFallsBackToDefault(t *testing.T) {
@@ -114,6 +156,9 @@ func TestMergeUnsetKeyFallsBackToDefault(t *testing.T) {
 	}
 	if eff.AllowedIPs != nil {
 		t.Errorf("AllowedIPs: wanted nil (allow all), got %v", eff.AllowedIPs)
+	}
+	if eff.Contacts != DefaultContacts {
+		t.Errorf("Contacts: wanted default %q, got %q", DefaultContacts, eff.Contacts)
 	}
 }
 
@@ -182,20 +227,8 @@ func TestFirstExistingRegularFileWins(t *testing.T) {
 }
 
 func TestLoadSearchUsesCWDThenUserConfigDir(t *testing.T) {
-	d := t.TempDir()
-	cwd := filepath.Join(d, "cwd")
-	if err := os.Mkdir(cwd, 0o755); err != nil {
-		t.Fatalf("mkdir cwd: %v", err)
-	}
-	ucfg := filepath.Join(d, "userconfig")
-	if err := os.Mkdir(ucfg, 0o755); err != nil {
-		t.Fatalf("mkdir ucfg: %v", err)
-	}
+	cwd, ucfg := chdirIsolated(t)
 	writeConfig(t, ucfg, "config.yml", "port: 1111\n")
-	// Point the user config dir at ucfg (hermetic, per-OS env name).
-	t.Setenv("APPDATA", ucfg)         // Windows
-	t.Setenv("XDG_CONFIG_HOME", ucfg) // Linux/macOS
-	t.Chdir(cwd)
 
 	cwdFile := writeConfig(t, cwd, "config.yml", "port: 2222\n")
 	eff, path, err := Load("", Flags{})
@@ -215,23 +248,12 @@ func TestLoadSearchUsesCWDThenUserConfigDir(t *testing.T) {
 }
 
 func TestLoadSearchSkipsDirectoryCandidate(t *testing.T) {
-	d := t.TempDir()
-	cwd := filepath.Join(d, "cwd")
-	if err := os.Mkdir(cwd, 0o755); err != nil {
-		t.Fatalf("mkdir cwd: %v", err)
-	}
+	cwd, ucfg := chdirIsolated(t)
 	// A DIRECTORY named config.yml in the CWD: present, but not a regular file.
 	if err := os.Mkdir(filepath.Join(cwd, "config.yml"), 0o755); err != nil {
 		t.Fatalf("mkdir dir-candidate: %v", err)
 	}
-	ucfg := filepath.Join(d, "userconfig")
-	if err := os.Mkdir(ucfg, 0o755); err != nil {
-		t.Fatalf("mkdir ucfg: %v", err)
-	}
 	ucfgFile := writeConfig(t, ucfg, "config.yml", "port: 3333\n")
-	t.Setenv("APPDATA", ucfg)
-	t.Setenv("XDG_CONFIG_HOME", ucfg)
-	t.Chdir(cwd)
 
 	eff, path, err := Load("", Flags{})
 	if err != nil {
@@ -348,6 +370,34 @@ func TestPrecedencePerParameterIndependent(t *testing.T) {
 	}
 }
 
+func TestPrecedenceContacts(t *testing.T) {
+	// YAML value beats the default "".
+	eff := merge(file{Contacts: pointerOf("book.csv")}, Flags{})
+	if eff.Contacts != "book.csv" {
+		t.Errorf("Contacts: wanted file book.csv, got %q", eff.Contacts)
+	}
+	// An explicitly EMPTY flag beats the YAML value (re-enables discovery).
+	eff = merge(file{Contacts: pointerOf("book.csv")}, Flags{Contacts: "", ContactsSet: true})
+	if eff.Contacts != "" {
+		t.Errorf("Contacts: wanted explicit-empty flag \"\", got %q", eff.Contacts)
+	}
+	// A non-empty flag value beats the YAML value.
+	eff = merge(file{Contacts: pointerOf("book.csv")}, Flags{Contacts: "flag.csv", ContactsSet: true})
+	if eff.Contacts != "flag.csv" {
+		t.Errorf("Contacts: wanted flag flag.csv, got %q", eff.Contacts)
+	}
+	// Value set but PRESENCE not set → ignored.
+	eff = merge(file{Contacts: pointerOf("book.csv")}, Flags{Contacts: "ignored.csv"})
+	if eff.Contacts != "book.csv" {
+		t.Errorf("Contacts: wanted file book.csv (flag not set), got %q", eff.Contacts)
+	}
+	// Unset everywhere → default.
+	eff = merge(file{}, Flags{})
+	if eff.Contacts != DefaultContacts {
+		t.Errorf("Contacts: wanted default %q, got %q", DefaultContacts, eff.Contacts)
+	}
+}
+
 // --- Errors (exact message formats) ---
 
 func TestE1UnparseableYAMLMessages(t *testing.T) {
@@ -398,6 +448,7 @@ func TestE3WrongTypePerKey(t *testing.T) {
 		{`allowed_ips: 10`, "list", "int"},
 		{`logfile: 7`, "string", "int"},
 		{`quiet: "no"`, "bool", "string"},
+		{`contacts: 123`, "string", "int"},
 	}
 	for _, tc := range cases {
 		_, err := decodeStrict([]byte(tc.doc), path)

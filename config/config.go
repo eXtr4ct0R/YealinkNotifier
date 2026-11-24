@@ -10,11 +10,12 @@ import (
 )
 
 const (
-	DefaultPort   = 8080
-	DefaultAddr   = "0.0.0.0"
-	DefaultNotify = true
-	DefaultBeep   = true
-	DefaultQuiet  = false
+	DefaultPort     = 8080
+	DefaultAddr     = "0.0.0.0"
+	DefaultNotify   = true
+	DefaultBeep     = true
+	DefaultQuiet    = false
+	DefaultContacts = ""
 )
 
 func DefaultLogfile() string {
@@ -33,6 +34,7 @@ type Effective struct {
 	AllowedIPs []string // nil/empty = allow all
 	Logfile    string   // "" = console
 	Quiet      bool
+	Contacts   string // "" = auto-discover contacts.csv
 }
 
 type Flags struct {
@@ -43,6 +45,7 @@ type Flags struct {
 	AllowedIPs    []string
 	Logfile       string
 	Quiet         bool
+	Contacts      string
 	PortSet       bool
 	AddrSet       bool
 	NotifySet     bool
@@ -50,6 +53,7 @@ type Flags struct {
 	AllowedIPsSet bool
 	LogfileSet    bool
 	QuietSet      bool
+	ContactsSet   bool
 }
 
 type file struct {
@@ -60,6 +64,7 @@ type file struct {
 	AllowedIPs []string `yaml:"allowed_ips"`
 	Logfile    *string  `yaml:"logfile"`
 	Quiet      *bool    `yaml:"quiet"`
+	Contacts   *string  `yaml:"contacts"`
 }
 
 var schema = map[string]string{
@@ -70,6 +75,7 @@ var schema = map[string]string{
 	"allowed_ips": "list",
 	"logfile":     "string",
 	"quiet":       "bool",
+	"contacts":    "string",
 }
 
 func Load(configPath string, f Flags) (Effective, string, error) {
@@ -191,6 +197,7 @@ func merge(f file, flags Flags) Effective {
 		Beep:       DefaultBeep,
 		Logfile:    DefaultLogfile(),
 		Quiet:      DefaultQuiet,
+		Contacts:   DefaultContacts,
 		AllowedIPs: f.AllowedIPs, // nil OK = allow all
 	}
 	if f.Port != nil {
@@ -210,6 +217,9 @@ func merge(f file, flags Flags) Effective {
 	}
 	if f.Quiet != nil {
 		eff.Quiet = *f.Quiet
+	}
+	if f.Contacts != nil {
+		eff.Contacts = *f.Contacts
 	}
 
 	if flags.PortSet {
@@ -232,6 +242,9 @@ func merge(f file, flags Flags) Effective {
 	}
 	if flags.QuietSet {
 		eff.Quiet = flags.Quiet
+	}
+	if flags.ContactsSet {
+		eff.Contacts = flags.Contacts
 	}
 	return eff
 }
