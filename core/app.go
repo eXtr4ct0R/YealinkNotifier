@@ -11,6 +11,7 @@ import (
 
 	"github.com/gen2brain/beeep"
 
+	"YealinkNotifier/contacts"
 	"YealinkNotifier/images"
 )
 
@@ -18,6 +19,10 @@ type App struct {
 	notify   atomic.Bool
 	beep     atomic.Bool
 	shutdown func(context.Context)
+
+	// contacts is written once by SetContacts before the server starts;
+	// all readers run afterwards, so no lock is needed.
+	contacts *contacts.Book
 
 	histMu  sync.Mutex
 	hist    []Event
@@ -54,20 +59,38 @@ func (a *App) AnyEnabled() bool {
 	return a.notify.Load() || a.beep.Load()
 }
 
+// SetContacts installs the contacts book used to decorate caller numbers.
+// It must be called before the server starts.
+func (a *App) SetContacts(b *contacts.Book) {
+	a.contacts = b
+}
+
+func (a *App) Contacts() *contacts.Book {
+	return a.contacts
+}
+
 func (a *App) OnCall(caller string) {
 	caller = sanitizeCaller(caller)
 	a.RecordEvent(caller)
-	title := "Incoming call from Yealink"
-	message := "You are being called! Check your office phone."
-	if caller != "" {
-		message = fmt.Sprintf("Caller number: %s", caller)
-	}
 	if a.NotifyEnabled() {
-		go a.Notify(title, message)
+		// The name lookup (possible disk I/O) runs here, off the handler path.
+		go func() { a.Notify("Incoming call from Yealink", a.callerMessage(caller)) }()
 	}
 	if a.BeepEnabled() {
 		go a.Beep()
 	}
+}
+
+// callerMessage builds the notification body: a known contact is shown as
+// "Name (number)", an unknown number as-is, an empty caller as the fallback.
+func (a *App) callerMessage(caller string) string {
+	if caller == "" {
+		return "You are being called! Check your office phone."
+	}
+	if name := a.contacts.Lookup(caller); name != "" {
+		return fmt.Sprintf("Caller: %s (%s)", name, caller)
+	}
+	return fmt.Sprintf("Caller number: %s", caller)
 }
 
 var (

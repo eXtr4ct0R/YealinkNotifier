@@ -43,7 +43,7 @@ func renderHistory(slots []*systray.MenuItem, app *core.App) {
 	events := app.Events()
 	for i, slot := range slots {
 		if i < len(events) {
-			slot.SetTitle(events[i].Time.Format("15:04:05") + " — " + events[i].Caller)
+			slot.SetTitle(events[i].Time.Format("15:04:05") + " — " + app.Contacts().Display(events[i].Caller))
 			slot.Show()
 		} else {
 			slot.Hide()
@@ -147,22 +147,42 @@ func onReady(app *core.App, shutdown func()) {
 		}
 	}()
 
+	editItem := systray.AddMenuItem("Edit contacts", "Open the contacts CSV file in the default application")
+	go func() {
+		for range editItem.ClickedCh {
+			book := app.Contacts()
+			if err := book.EnsureFile(); err != nil {
+				log.Printf("Error creating contacts file (%s): %v", book.Path(), err)
+				continue
+			}
+			log.Printf("Opening contacts file: %s", book.Path())
+			if err := book.Open(); err != nil {
+				log.Printf("Error opening contacts file: %v", err)
+			}
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(300 * time.Millisecond)
 		defer ticker.Stop()
 		last := app.HistoryVersion()
+		lastBook := app.Contacts().Version()
 		renderHistory(slots, app)
 		for {
 			select {
 			case <-app.Done():
 				return
 			case <-ticker.C:
-				if v := app.HistoryVersion(); v != last {
+				// Version() also refreshes the contacts cache (one stat per tick).
+				bv := app.Contacts().Version()
+				if v := app.HistoryVersion(); v != last || bv != lastBook {
 					last = v
+					lastBook = bv
 					renderHistory(slots, app)
 				}
 			case <-renderCh:
 				last = app.HistoryVersion()
+				lastBook = app.Contacts().Version()
 				renderHistory(slots, app)
 			}
 		}
