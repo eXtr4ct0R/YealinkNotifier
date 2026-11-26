@@ -8,12 +8,14 @@ package contacts
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/csv"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,10 @@ import (
 
 // maxFileSize bounds the reload: anything larger is treated as malformed.
 const maxFileSize = 1 << 20
+
+// maxLabelRunes bounds a rendered contacts label. Display only: the lookup
+// keys stay raw and unbounded.
+const maxLabelRunes = 128
 
 // Resolve turns the configured contacts path into an absolute file path.
 // It never errors and never creates anything (read-only os.Stat probing).
@@ -126,6 +132,129 @@ func (b *Book) Display(number string) string {
 		return fmt.Sprintf("%s (%s)", name, number)
 	}
 	return number
+}
+
+// Entry is one contacts-book row: the raw exact-match number and the
+// sanitized display name.
+type Entry struct {
+	Number string
+	Name   string
+}
+
+// Label renders the entry for display: "Name — number" (em dash, matching
+// the history labels), the number when the name is empty, the name when the
+// number is empty. Display-only hygiene: control characters in either part
+// fold to single spaces and the result is trimmed; XML-unsafe characters are
+// deliberately kept (a tray label is never interpolated into a toast body).
+// The final label is capped at maxLabelRunes runes; lookup keys stay raw.
+func (e Entry) Label() string {
+	name := displayText(e.Name)
+	number := displayText(e.Number)
+	switch {
+	case number == "":
+		return name
+	case name == "":
+		return number
+	}
+	label := name + " — " + number
+	if runes := []rune(label); len(runes) > maxLabelRunes {
+		label = string(runes[:maxLabelRunes])
+	}
+	return label
+}
+
+// entryRow is the sortable form of one book row: the entry plus its
+// lowercased name, filled in outside the book mutex.
+type entryRow struct {
+	entry     Entry
+	lowerName string
+}
+
+// snapshotRows copies the current names map into rows with the mutex held.
+// lowerName stays empty — the caller fills it outside the lock so the
+// notify path never waits on string processing. A nil book yields nil.
+func (b *Book) snapshotRows() []entryRow {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refresh()
+	if len(b.names) == 0 {
+		return nil
+	}
+	rows := make([]entryRow, 0, len(b.names))
+	for number, name := range b.names {
+		rows = append(rows, entryRow{entry: Entry{Number: number, Name: name}})
+	}
+	return rows
+}
+
+// Entries returns a sorted snapshot of the book: name ascending,
+// case-insensitive, ties broken by number ascending (byte order). It is a
+// defensive copy (a fresh slice on every call); a nil book, a missing file
+// or a malformed file yields nil. The map is copied under the lock; the
+// lowercasing and the sort happen outside it, so a concurrent notify-path
+// Lookup never waits on either.
+func (b *Book) Entries() []Entry {
+	rows := b.snapshotRows()
+	if len(rows) == 0 {
+		return nil
+	}
+	for i := range rows {
+		rows[i].lowerName = strings.ToLower(rows[i].entry.Name)
+	}
+	slices.SortFunc(rows, func(x, y entryRow) int {
+		if n := cmp.Compare(x.lowerName, y.lowerName); n != 0 {
+			return n
+		}
+		return cmp.Compare(x.entry.Number, y.entry.Number)
+	})
+	entries := make([]Entry, len(rows))
+	for i, r := range rows {
+		entries[i] = r.entry
+	}
+	return entries
+}
+
+// SlotLabels returns the display labels of the first max entries (in
+// Entries order), or nil when max is not positive or the book is empty.
+// This is the only contacts API the Contacts submenu uses for its labels.
+func (b *Book) SlotLabels(max int) []string {
+	if max <= 0 {
+		return nil
+	}
+	entries := b.Entries()
+	if len(entries) == 0 {
+		return nil
+	}
+	if max > len(entries) {
+		max = len(entries)
+	}
+	labels := make([]string, max)
+	for i := range labels {
+		labels[i] = entries[i].Label()
+	}
+	return labels
+}
+
+// displayText folds control-character runs to a single space and trims the
+// result. Display-only: unlike sanitizeName it keeps XML-unsafe characters.
+func displayText(s string) string {
+	var b strings.Builder
+	pendingSpace := false
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // Version counts observed file changes (every reload, including deletion
