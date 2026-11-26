@@ -342,6 +342,12 @@ func TestRefreshReadErrorKeepsLastGood(t *testing.T) {
 	if got := b.Lookup("144"); got != "Alice" {
 		t.Errorf("Lookup after read error = %q, want last-good %q", got, "Alice")
 	}
+	if got := b.Entries(); !slices.Equal(got, []Entry{{Number: "144", Name: "Alice"}}) {
+		t.Errorf("Entries after read error = %v, want the last-good entry", got)
+	}
+	if got := b.SlotLabels(25); !slices.Equal(got, []string{"Alice — 144"}) {
+		t.Errorf("SlotLabels after read error = %v, want the last-good label", got)
+	}
 	if got := b.Version(); got != v+1 {
 		t.Errorf("Version after read error = %d, want %d", got, v+1)
 	}
@@ -590,6 +596,117 @@ func TestEnsureFileOpenError(t *testing.T) {
 	}
 }
 
+// --- Entries / SlotLabels / Label ---
+
+func TestEntriesSortsByNameCaseInsensitiveThenNumber(t *testing.T) {
+	b := bookOver(t, "222,bob\n145,Alice\n144,alice\n100,Carol\n")
+	got := b.Entries()
+	want := []Entry{
+		{Number: "144", Name: "alice"},
+		{Number: "145", Name: "Alice"},
+		{Number: "222", Name: "bob"},
+		{Number: "100", Name: "Carol"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Entries():\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestEntriesNilBook(t *testing.T) {
+	var b *Book
+	if got := b.Entries(); got != nil {
+		t.Errorf("nil Entries() = %v, want nil", got)
+	}
+	missing := New(filepath.Join(t.TempDir(), "contacts.csv"))
+	if got := missing.Entries(); got != nil {
+		t.Errorf("Entries() on a missing file = %v, want nil", got)
+	}
+}
+
+func TestEntriesDefensiveCopy(t *testing.T) {
+	b := bookOver(t, "144,Alice\n222,Bob\n")
+	first := b.Entries()
+	if len(first) != 2 {
+		t.Fatalf("Entries() len = %d, want 2", len(first))
+	}
+	first[0].Name = "Mallory"
+	first = append(first, Entry{Number: "999", Name: "Eve"})
+	second := b.Entries()
+	want := []Entry{{Number: "144", Name: "Alice"}, {Number: "222", Name: "Bob"}}
+	if !slices.Equal(second, want) {
+		t.Errorf("Entries() after mutating an earlier snapshot:\n got  %v\n want %v", second, want)
+	}
+}
+
+func TestEntriesSeesFileChange(t *testing.T) {
+	p := writeContactsFile(t, t.TempDir(), "144,Alice\n")
+	b := New(p)
+	if got := b.Entries(); len(got) != 1 {
+		t.Fatalf("Entries() len = %d, want 1 (%v)", len(got), got)
+	}
+	// Different size: the mtime/size cache must notice even when the mtime
+	// granularity is coarse.
+	writeContactsFile(t, filepath.Dir(p), "144,Alice\n222,Bob\n")
+	want := []Entry{{Number: "144", Name: "Alice"}, {Number: "222", Name: "Bob"}}
+	if got := b.Entries(); !slices.Equal(got, want) {
+		t.Errorf("Entries() after rewrite:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestEntryLabel(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  string
+	}{
+		{"name and number", Entry{Number: "144", Name: "Alice"}, "Alice — 144"},
+		{"empty name falls back to number", Entry{Number: "144"}, "144"},
+		{"control chars fold to single spaces", Entry{Number: "144", Name: "A\tB\r\nC"}, "A B C — 144"},
+		{"numbers are not XML-stripped", Entry{Number: "1<44", Name: "Alice"}, "Alice — 1<44"},
+		{"parts are trimmed", Entry{Number: "144", Name: "  Alice  "}, "Alice — 144"},
+		{"label capped at 128 runes", Entry{Number: strings.Repeat("7", 200), Name: "Alice"}, string([]rune("Alice — " + strings.Repeat("7", 200))[:128])},
+		{"empty folded number leaves no dangling separator", Entry{Number: "\x00", Name: "Alice"}, "Alice"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.entry.Label(); got != tt.want {
+				t.Errorf("Label() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSlotLabels(t *testing.T) {
+	var b strings.Builder
+	for i := range 30 {
+		fmt.Fprintf(&b, "%03d,Name%02d\n", i, i)
+	}
+	book := bookOver(t, b.String())
+
+	labels := book.SlotLabels(25)
+	if len(labels) != 25 {
+		t.Fatalf("SlotLabels(25) len = %d, want 25", len(labels))
+	}
+	entries := book.Entries()
+	for i, label := range labels {
+		if want := entries[i].Label(); label != want {
+			t.Errorf("SlotLabels(25)[%d] = %q, want %q (Entries order)", i, label, want)
+		}
+	}
+
+	if got := book.SlotLabels(0); got != nil {
+		t.Errorf("SlotLabels(0) = %v, want nil", got)
+	}
+	if got := book.SlotLabels(-5); got != nil {
+		t.Errorf("SlotLabels(-5) = %v, want nil", got)
+	}
+
+	empty := New(filepath.Join(t.TempDir(), "contacts.csv"))
+	if got := empty.SlotLabels(25); got != nil {
+		t.Errorf("SlotLabels on an empty book = %v, want nil", got)
+	}
+}
+
 // --- Concurrency (go test -race) ---
 
 func TestBookConcurrentReadersAndWriter(t *testing.T) {
@@ -604,6 +721,8 @@ func TestBookConcurrentReadersAndWriter(t *testing.T) {
 				b.Lookup("144")
 				b.Display("144")
 				b.Version()
+				b.Entries()
+				b.SlotLabels(25)
 			}
 		})
 	}
@@ -639,5 +758,268 @@ func TestBookConcurrentReadersAndWriter(t *testing.T) {
 	writeContactsFile(t, filepath.Dir(p), "144,Alice\n")
 	if got := b.Lookup("144"); got != "Alice" {
 		t.Errorf("Lookup after concurrent churn = %q, want %q", got, "Alice")
+	}
+}
+
+// --- Independent verification: boundary, ordering, fail-open, snapshots ---
+
+func TestSlotLabelsExactlyCapacity(t *testing.T) {
+	var b strings.Builder
+	for i := range contactsTestCapacity {
+		fmt.Fprintf(&b, "%03d,Name%02d\n", i, i)
+	}
+	book := bookOver(t, b.String())
+
+	labels := book.SlotLabels(contactsTestCapacity)
+	if len(labels) != contactsTestCapacity {
+		t.Fatalf("SlotLabels(%d) len = %d, want exactly %d", contactsTestCapacity, len(labels), contactsTestCapacity)
+	}
+	entries := book.Entries()
+	if len(entries) != contactsTestCapacity {
+		t.Fatalf("Entries() len = %d, want %d", len(entries), contactsTestCapacity)
+	}
+	// No truncation below the cap: full Entries order, label by label.
+	for i := range labels {
+		if want := entries[i].Label(); labels[i] != want {
+			t.Errorf("SlotLabels(%d)[%d] = %q, want %q", contactsTestCapacity, i, labels[i], want)
+		}
+	}
+	// A larger request is clamped to the available entries, not padded.
+	if got := book.SlotLabels(contactsTestCapacity + 100); len(got) != contactsTestCapacity {
+		t.Errorf("SlotLabels(over cap) len = %d, want %d", len(got), contactsTestCapacity)
+	}
+}
+
+// contactsTestCapacity mirrors the tray's private contactsMenuCapacity
+// (25). Duplicated here on purpose: the contacts package must not depend on
+// the tray, and the number is part of the documented contracts.
+const contactsTestCapacity = 25
+
+func TestSlotLabelsNilBook(t *testing.T) {
+	var b *Book
+	if got := b.SlotLabels(25); got != nil {
+		t.Errorf("nil SlotLabels(25) = %v, want nil", got)
+	}
+	if got := b.SlotLabels(0); got != nil {
+		t.Errorf("nil SlotLabels(0) = %v, want nil", got)
+	}
+	if got := b.SlotLabels(-1); got != nil {
+		t.Errorf("nil SlotLabels(-1) = %v, want nil", got)
+	}
+}
+
+func TestSlotLabelsEmptyExistingFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"empty file", ""},
+		{"header only", "\xEF\xBB\xBFnumber,name\r\n"},
+		{"blank lines only", "\n\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := bookOver(t, tt.content)
+			if got := b.SlotLabels(25); got != nil {
+				t.Errorf("SlotLabels on %s = %v, want nil", tt.name, got)
+			}
+			if got := b.Entries(); got != nil {
+				t.Errorf("Entries on %s = %v, want nil", tt.name, got)
+			}
+		})
+	}
+}
+
+// TestEntriesSortTieBreakUsesLexicographicNumber documents the ACTUAL
+// behaviour: the tie-break is cmp.Compare on the raw number string, so it is
+// byte-lexicographic, not numeric. "10" therefore sorts before "9". This is
+// intentional to document; do not "fix" it without a spec change.
+func TestEntriesSortTieBreakUsesLexicographicNumber(t *testing.T) {
+	b := bookOver(t, "9,Same\n10,Same\n100,Same\n2,Same\n")
+	got := b.Entries()
+	wantNumbers := []string{"10", "100", "2", "9"} // lexicographic, not 2 < 9 < 10 < 100
+	if len(got) != len(wantNumbers) {
+		t.Fatalf("Entries() len = %d, want %d", len(got), len(wantNumbers))
+	}
+	for i, want := range wantNumbers {
+		if got[i].Number != want {
+			t.Errorf("Entries()[%d].Number = %q, want %q (lexicographic number tie-break)", i, got[i].Number, want)
+		}
+	}
+}
+
+func TestEntriesSortsNonASCIINames(t *testing.T) {
+	// Byte order of the lowercased names: anna < zoë < åke < 李 (61 < 7A <
+	// C3 < E6). Deterministic and documented, not locale-collated.
+	b := bookOver(t, "1,李\n2,Åke\n3,Zoë\n4,anna\n")
+	got := b.Entries()
+	want := []string{"anna", "Zoë", "Åke", "李"}
+	if len(got) != len(want) {
+		t.Fatalf("Entries() len = %d, want %d", len(got), len(want))
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Errorf("Entries()[%d].Name = %q, want %q (byte-lexicographic ascending)", i, got[i].Name, name)
+		}
+	}
+}
+
+func TestEntriesDeterministicAcrossCalls(t *testing.T) {
+	b := bookOver(t, "222,bob\n145,Alice\n144,alice\n9,Same\n10,Same\n100,Carol\n")
+	first := b.Entries()
+	for i := range 10 {
+		again := b.Entries()
+		if !slices.Equal(first, again) {
+			t.Fatalf("Entries() call %d differs from the first:\n got  %v\n want %v", i+2, again, first)
+		}
+	}
+}
+
+func TestEntriesAfterDeletionIsNil(t *testing.T) {
+	p := writeContactsFile(t, t.TempDir(), "144,Alice\n")
+	b := New(p)
+	if got := b.Entries(); len(got) != 1 {
+		t.Fatalf("Entries() before deletion = %v, want 1 entry", got)
+	}
+	v := b.Version()
+	if err := os.Remove(p); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got := b.Entries(); got != nil {
+		t.Errorf("Entries() after deletion = %v, want nil (fail-open)", got)
+	}
+	if got := b.SlotLabels(25); got != nil {
+		t.Errorf("SlotLabels after deletion = %v, want nil", got)
+	}
+	if got := b.Version(); got != v+1 {
+		t.Errorf("Version after deletion = %d, want %d", got, v+1)
+	}
+}
+
+func TestEntriesMalformedFileIsNil(t *testing.T) {
+	p := writeContactsFile(t, t.TempDir(), "144,Alice\n")
+	b := New(p)
+	if got := b.Entries(); len(got) != 1 {
+		t.Fatalf("Entries() before malformed rewrite = %v, want 1 entry", got)
+	}
+	// Different size so the mtime/size signature always changes.
+	writeContactsFile(t, filepath.Dir(p), "144,\xFF\n")
+	if got := b.Entries(); got != nil {
+		t.Errorf("Entries() on malformed file = %v, want nil", got)
+	}
+	if got := b.SlotLabels(25); got != nil {
+		t.Errorf("SlotLabels on malformed file = %v, want nil", got)
+	}
+	// Recovery.
+	writeContactsFile(t, filepath.Dir(p), "144,Alice\n222,Bob\n")
+	want := []Entry{{Number: "144", Name: "Alice"}, {Number: "222", Name: "Bob"}}
+	if got := b.Entries(); !slices.Equal(got, want) {
+		t.Errorf("Entries() after recovery:\n got  %v\n want %v", got, want)
+	}
+}
+
+func TestEntryLabelControlCharactersAndXML(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  string
+	}{
+		{"NUL folds to a space", Entry{Number: "144", Name: "A\x00B"}, "A B — 144"},
+		{"control run folds to one space", Entry{Number: "144", Name: "A\t\r\n\x00B"}, "A B — 144"},
+		{"leading and trailing controls trimmed", Entry{Number: "144", Name: "\t\r\nAlice\x00"}, "Alice — 144"},
+		{"name that is only control chars falls back to number", Entry{Number: "144", Name: "\t\r\n"}, "144"},
+		{"XML-unsafe name chars preserved", Entry{Number: "144", Name: `<A&B>"x'`}, `<A&B>"x' — 144`},
+		{"number control chars folded too", Entry{Number: "1\x0044", Name: "Alice"}, "Alice — 1 44"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.entry.Label(); got != tt.want {
+				t.Errorf("Label() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSlotLabelsLongNameCappedAt64Runes(t *testing.T) {
+	// parse() caps names at 64 runes; Label must not re-expand them.
+	b := bookOver(t, "144,"+strings.Repeat("x", 70)+"\n")
+	labels := b.SlotLabels(1)
+	if len(labels) != 1 {
+		t.Fatalf("SlotLabels(1) = %v, want 1 label", labels)
+	}
+	want := strings.Repeat("x", 64) + " — 144"
+	if labels[0] != want {
+		t.Errorf("label = %q, want %q", labels[0], want)
+	}
+}
+
+func TestSlotLabelsDefensiveCopy(t *testing.T) {
+	b := bookOver(t, "144,Alice\n222,Bob\n")
+	first := b.SlotLabels(5)
+	if len(first) != 2 {
+		t.Fatalf("SlotLabels(5) len = %d, want 2", len(first))
+	}
+	first[0] = "mutated"
+	first = append(first, "extra")
+	second := b.SlotLabels(5)
+	want := []string{"Alice — 144", "Bob — 222"}
+	if !slices.Equal(second, want) {
+		t.Errorf("SlotLabels after mutating an earlier slice:\n got  %v\n want %v", second, want)
+	}
+}
+
+// TestBookConcurrentSnapshotShape asserts both no-race AND snapshot
+// invariants while the file churns: every returned Entry is fully populated
+// (parse skips empty number/name rows) and label slices never exceed the cap
+// nor contain empty strings.
+func TestBookConcurrentSnapshotShape(t *testing.T) {
+	p := writeContactsFile(t, t.TempDir(), "144,Alice\n222,Bob\n")
+	b := New(p)
+
+	const readers = 4
+	var wg sync.WaitGroup
+	for range readers {
+		wg.Go(func() {
+			for range 150 {
+				for _, e := range b.Entries() {
+					if e.Number == "" {
+						t.Errorf("Entries() returned an empty Number: %+v", e)
+					}
+					if e.Name == "" {
+						t.Errorf("Entries() returned an empty Name: %+v", e)
+					}
+				}
+				labels := b.SlotLabels(contactsTestCapacity)
+				if len(labels) > contactsTestCapacity {
+					t.Errorf("SlotLabels len = %d, want <= %d", len(labels), contactsTestCapacity)
+				}
+				for _, l := range labels {
+					if l == "" {
+						t.Errorf("SlotLabels returned an empty label: %v", labels)
+					}
+				}
+			}
+		})
+	}
+	wg.Go(func() {
+		for i := range 40 {
+			var err error
+			switch i % 2 {
+			case 0:
+				err = os.WriteFile(p, []byte(fmt.Sprintf("144,Name%d\n222,Bob\n", i)), 0o644)
+			case 1:
+				err = os.WriteFile(p, []byte("144,\xFF\n"), 0o644)
+			}
+			if err != nil {
+				t.Errorf("writer iteration %d: %v", i, err)
+			}
+		}
+	})
+	wg.Wait()
+
+	writeContactsFile(t, filepath.Dir(p), "144,Alice\n")
+	want := []Entry{{Number: "144", Name: "Alice"}}
+	if got := b.Entries(); !slices.Equal(got, want) {
+		t.Errorf("Entries() after churn:\n got  %v\n want %v", got, want)
 	}
 }

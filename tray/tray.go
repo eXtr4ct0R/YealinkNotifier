@@ -19,6 +19,14 @@ var (
 	started   atomic.Bool
 )
 
+const (
+	// contactsMenuCapacity is the number of pre-created Contacts submenu
+	// slots; entries past it are truncated silently.
+	contactsMenuCapacity = 25
+	// noContactsLabel is the slot-0 placeholder of an empty contacts book.
+	noContactsLabel = "No contacts"
+)
+
 func trayIconBytes(on bool) []byte {
 	windows := runtime.GOOS == "windows"
 	if on {
@@ -44,6 +52,31 @@ func renderHistory(slots []*systray.MenuItem, app *core.App) {
 	for i, slot := range slots {
 		if i < len(events) {
 			slot.SetTitle(events[i].Time.Format("15:04:05") + " — " + app.Contacts().Display(events[i].Caller))
+			slot.Show()
+		} else {
+			slot.Hide()
+		}
+	}
+}
+
+func renderContacts(slots []*systray.MenuItem, app *core.App) {
+	if len(slots) == 0 {
+		return
+	}
+	labels := app.Contacts().SlotLabels(len(slots))
+	if len(labels) == 0 {
+		slots[0].SetTitle(noContactsLabel)
+		slots[0].Show()
+		for _, s := range slots[1:] {
+			s.Hide()
+		}
+		return
+	}
+	// Ascending iteration only: Windows appends re-shown items in Show()
+	// call order.
+	for i, slot := range slots {
+		if i < len(labels) {
+			slot.SetTitle(labels[i])
 			slot.Show()
 		} else {
 			slot.Hide()
@@ -128,24 +161,11 @@ func onReady(app *core.App, shutdown func()) {
 
 	systray.AddSeparator()
 
-	history := systray.AddMenuItem("History", "Incoming call history")
-	slots := make([]*systray.MenuItem, core.HistoryCapacity)
-	for i := range slots {
-		slots[i] = history.AddSubMenuItem("", "")
+	contactsItem := systray.AddMenuItem("Contacts", "View the contacts book")
+	contactSlots := make([]*systray.MenuItem, contactsMenuCapacity)
+	for i := range contactSlots {
+		contactSlots[i] = contactsItem.AddSubMenuItem("", "")
 	}
-
-	renderCh := make(chan struct{}, 1)
-	clearItem := systray.AddMenuItem("Clear history", "Clear the incoming call history")
-	go func() {
-		for range clearItem.ClickedCh {
-			app.ClearHistory()
-			log.Println("Call history cleared")
-			select {
-			case renderCh <- struct{}{}:
-			default:
-			}
-		}
-	}()
 
 	editItem := systray.AddMenuItem("Edit contacts", "Open the contacts CSV file in the default application")
 	go func() {
@@ -162,28 +182,53 @@ func onReady(app *core.App, shutdown func()) {
 		}
 	}()
 
+	systray.AddSeparator()
+
+	history := systray.AddMenuItem("History", "Incoming call history")
+	histSlots := make([]*systray.MenuItem, core.HistoryCapacity)
+	for i := range histSlots {
+		histSlots[i] = history.AddSubMenuItem("", "")
+	}
+
+	renderCh := make(chan struct{}, 1)
+	clearItem := systray.AddMenuItem("Clear history", "Clear the incoming call history")
+	go func() {
+		for range clearItem.ClickedCh {
+			app.ClearHistory()
+			log.Println("Call history cleared")
+			select {
+			case renderCh <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(300 * time.Millisecond)
 		defer ticker.Stop()
-		last := app.HistoryVersion()
+		lastHist := app.HistoryVersion()
 		lastBook := app.Contacts().Version()
-		renderHistory(slots, app)
+		renderHistory(histSlots, app)
+		renderContacts(contactSlots, app)
 		for {
 			select {
 			case <-app.Done():
 				return
 			case <-ticker.C:
-				// Version() also refreshes the contacts cache (one stat per tick).
+				// An idle tick stats once; a re-render adds one stat for the
+				// contacts snapshot plus one per history row (Display → Lookup).
 				bv := app.Contacts().Version()
-				if v := app.HistoryVersion(); v != last || bv != lastBook {
-					last = v
+				if v := app.HistoryVersion(); v != lastHist || bv != lastBook {
+					lastHist = v
 					lastBook = bv
-					renderHistory(slots, app)
+					renderHistory(histSlots, app)
+					renderContacts(contactSlots, app)
 				}
 			case <-renderCh:
-				last = app.HistoryVersion()
+				lastHist = app.HistoryVersion()
 				lastBook = app.Contacts().Version()
-				renderHistory(slots, app)
+				renderHistory(histSlots, app)
+				renderContacts(contactSlots, app)
 			}
 		}
 	}()
