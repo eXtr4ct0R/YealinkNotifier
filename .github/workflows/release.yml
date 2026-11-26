@@ -63,7 +63,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64
+          name: YealinkNotifier-windows-amd64
           path: bin/YealinkNotifier.exe
 
   build-linux:
@@ -110,7 +110,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
+          name: YealinkNotifier-linux-amd64
           path: bin/YealinkNotifier
 
   build-darwin:
@@ -150,7 +150,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
+          name: YealinkNotifier-darwin-amd64
           path: bin/YealinkNotifier
 
   release:
@@ -175,37 +175,36 @@ jobs:
       - name: Download Windows artifact
         uses: actions/download-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64
+          name: YealinkNotifier-windows-amd64
           path: assets/windows
 
       - name: Download Linux artifact
         uses: actions/download-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
+          name: YealinkNotifier-linux-amd64
           path: assets/linux
 
       - name: Download Darwin artifact
         uses: actions/download-artifact@v7
         with:
-          name: YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
+          name: YealinkNotifier-darwin-amd64
           path: assets/darwin
 
       - name: Rename release assets
         shell: bash
         run: |
-          V=${{ steps.version.outputs.version }}
-          mv assets/windows/YealinkNotifier.exe YealinkNotifier-${V}-windows-amd64.exe
-          mv assets/linux/YealinkNotifier       YealinkNotifier-${V}-linux-amd64
-          mv assets/darwin/YealinkNotifier      YealinkNotifier-${V}-darwin-amd64
+          mv assets/windows/YealinkNotifier.exe YealinkNotifier-windows-amd64.exe
+          mv assets/linux/YealinkNotifier       YealinkNotifier-linux-amd64
+          mv assets/darwin/YealinkNotifier      YealinkNotifier-darwin-amd64
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           files: |
-            YealinkNotifier-${{ steps.version.outputs.version }}-windows-amd64.exe
-            YealinkNotifier-${{ steps.version.outputs.version }}-linux-amd64
-            YealinkNotifier-${{ steps.version.outputs.version }}-darwin-amd64
+            YealinkNotifier-windows-amd64.exe
+            YealinkNotifier-linux-amd64
+            YealinkNotifier-darwin-amd64
           draft: false
           prerelease: false
           generate_release_notes: true
